@@ -1,0 +1,7 @@
+name: OpenEuropa GPT@EC AI Provider
+description: 'Enables the use of GPT@EC as provider for the AI module.'
+type: module
+core_version_requirement: ^10 || ^11
+dependencies:
+  - ai:ai
+  - key:key
