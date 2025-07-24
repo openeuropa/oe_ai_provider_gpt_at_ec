@@ -98,9 +98,6 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
       return FALSE;
     }
 
-    // @todo Weird that this check is here, given that
-    //   ::getSupportedOperationTypes is from the interface and could be
-    //   checked somewhere else.
     if ($operation_type) {
       return in_array($operation_type, $this->getSupportedOperationTypes());
     }
