@@ -1,0 +1,32 @@
+chat:
+  input:
+    description: 'Input provided to the model.'
+    type: 'array'
+    default:
+      - { role: "system", content: "You are a helpful assistant." }
+      - { role: "user", content: "Introduce yourself!" }
+    required: true
+  configuration:
+    top_p:
+      label: 'Top P'
+      description: "Controls nucleus sampling (a technique for controlling randomness). Accepts a value between 0 and 1. The model considers only the smallest set of tokens whose cumulative probability is greater than or equal to top_p. A lower value results in more focused and deterministic outputs."
+      type: 'float'
+      required: false
+      constraints:
+        min: 0
+        max: 1
+        step: 0.1
+    temperature:
+      label: 'Temperature'
+      description: "Controls randomness in the model's output. Accepts a value between 0 and 1. A higher value (e.g., 0.8 ) makes the output more random and creative, while a lower value (e.g., 0.2 ) makes the output more deterministic and focused."
+      type: 'float'
+      required: false
+      constraints:
+        min: 0
+        max: 1
+        step: 0.1
+    max_tokens:
+      label: 'Max tokens'
+      description: "The maximum number of tokens in the generated response. Setting this value limits the length of the assistant's output. You can use this to control processing time and token usage."
+      type: 'integer'
+      required: false

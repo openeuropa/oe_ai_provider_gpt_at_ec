@@ -1,0 +1,8 @@
+oe_ai_provider_gpt_at_ec.settings_form:
+  path: '/admin/config/ai/providers/gpt-at-ec'
+  defaults:
+    _form: '\Drupal\oe_ai_provider_gpt_at_ec\Form\GptAtEcConfigForm'
+    _title: 'Setup GPT@EC configuration'
+  requirements:
+    _permission: 'administer ai providers'
+

@@ -14,7 +14,8 @@
         "drupal/key": "^1.20"
     },
     "require-dev": {
-        "drush/drush": "^12 || ^13"
+        "drush/drush": "^12 || ^13",
+        "openai-php/client": ">=v0.10.1"
     },
     "config": {
         "allow-plugins": {
