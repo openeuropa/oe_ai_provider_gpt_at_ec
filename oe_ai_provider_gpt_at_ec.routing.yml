@@ -5,4 +5,3 @@ oe_ai_provider_gpt_at_ec.settings_form:
     _title: 'Setup GPT@EC configuration'
   requirements:
     _permission: 'administer ai providers'
-

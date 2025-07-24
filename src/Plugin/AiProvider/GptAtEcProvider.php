@@ -18,6 +18,9 @@ use Drupal\oe_ai_provider_gpt_at_ec\ChatMessageIterator;
 use OpenAI\Client;
 use Symfony\Component\Yaml\Yaml;
 
+/**
+ * Implementation of an AI provider that uses GPT@EC.
+ */
 #[AiProvider(
   id: 'gpt_at_ec',
   label: new TranslatableMarkup('GPT@EC')
@@ -158,7 +161,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
     }
     catch (\Exception $e) {
       // @todo No clue which exceptions messages are available, so just rethrow
-      //    for now.
+      //   for now.
       throw $e;
     }
 

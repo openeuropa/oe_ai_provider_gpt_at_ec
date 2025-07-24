@@ -30,6 +30,9 @@ class GptAtEcConfigForm extends ConfigFormBase {
     return 'oe_ai_provider_gpt_at_ec_provider_config_form';
   }
 
+  /**
+   * {@inheritdoc}
+   */
   public function buildForm(array $form, FormStateInterface $form_state) {
     $config = $this->config(GptAtEcProvider::CONFIG_NAME);
 

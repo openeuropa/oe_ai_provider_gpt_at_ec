@@ -3,4 +3,3 @@ oe_ai_provider_gpt_at_ec.provider_settings:
   description: "Configure settings for GPT@EC"
   route_name: oe_ai_provider_gpt_at_ec.settings_form
   parent: ai.admin_providers
-
