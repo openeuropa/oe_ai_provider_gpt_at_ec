@@ -6,6 +6,22 @@ Enables the use of GPT@EC as provider for the Drupal AI module.
 
 ## Installation
 
+Add this repository to your composer.json:
+```
+repositories: [
+  {
+    "type": "git",
+    "url": "https://github.com/brummbar/poc_oe_ai_provider_gpt_at_ec"
+  },
+  ...
+]
+```
+
+then execute:
+```shell
+composer require openeuropa/oe_ai_provider_gpt_at_ec
+```
+
 Install as you would normally install a contributed Drupal module. For further
 information, see
 [Installing Drupal Modules](https://www.drupal.org/docs/extending-drupal/installing-drupal-modules).
