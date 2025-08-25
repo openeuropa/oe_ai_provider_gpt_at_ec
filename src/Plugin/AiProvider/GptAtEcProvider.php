@@ -15,7 +15,8 @@ use Drupal\Core\Config\ImmutableConfig;
 use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
 use Drupal\oe_ai_provider_gpt_at_ec\ChatMessageIterator;
-use OpenAI\Client;
+use Openeuropa\GptAtEcPhpClient\Client;
+use Openeuropa\GptAtEcPhpClient\Factory;
 use Symfony\Component\Yaml\Yaml;
 
 /**
@@ -32,9 +33,9 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
   public const string CONFIG_NAME = 'oe_ai_provider_gpt_at_ec.settings';
 
   /**
-   * The OpenAI client.
+   * The GPT@EC PHP client.
    *
-   * @var \OpenAI\Client
+   * @var \Openeuropa\GptAtEcPhpClient\Client
    */
   protected Client $client;
 
@@ -58,7 +59,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    * {@inheritdoc}
    */
   public function getConfiguredModels(?string $operation_type = NULL, array $capabilities = []): array {
-    if ($operation_type !== 'chat') {
+    if ($operation_type !== 'chat' && $operation_type !== NULL) {
       // @todo Since only chat is supported, do we need to filter by capabilities?
       throw new \RuntimeException('WHY?');
     }
@@ -173,8 +174,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
       return;
     }
 
-    $this->client = \OpenAI::factory()
-      ->withBaseUri('https://api.tech.ec.europa.eu/ecgpt/v1')
+    $this->client = (new Factory())
       ->withApiKey($this->loadApiKey())
       ->withHttpClient($this->httpClient)
       ->make();
