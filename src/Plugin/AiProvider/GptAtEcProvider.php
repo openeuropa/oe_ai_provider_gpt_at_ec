@@ -61,7 +61,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
   public function getConfiguredModels(?string $operation_type = NULL, array $capabilities = []): array {
     if ($operation_type !== 'chat' && $operation_type !== NULL) {
       // @todo Since only chat is supported, do we need to filter by capabilities?
-      throw new \RuntimeException('WHY?');
+      throw new \RuntimeException('Operation not supported.');
     }
 
     $this->loadClient();
@@ -110,7 +110,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    * {@inheritdoc}
    */
   public function setAuthentication(mixed $authentication): void {
-    throw new \RuntimeException('Why is this needed? Why?');
+    throw new \RuntimeException('This method is currently not supported as we don\'t store the API key as property in the class.');
   }
 
   /**
@@ -158,8 +158,9 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
       }
     }
     catch (\Exception $e) {
-      // @todo No clue which exceptions messages are available, so just rethrow
-      //   for now.
+      // @todo We currently don't know which exceptions are thrown and what are
+      //   their messages, so we just rethrow the normal exception.
+      //   This try/catch block is therefor useless.
       throw $e;
     }
 
