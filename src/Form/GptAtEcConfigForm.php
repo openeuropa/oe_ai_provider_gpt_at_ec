@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Drupal\oe_ai_provider_gpt_at_ec\Form;
 
+use Drupal\key\KeyInterface;
 use Drupal\key\KeyRepositoryInterface;
 use Drupal\oe_ai_provider_gpt_at_ec\Plugin\AiProvider\GptAtEcProvider;
 use Drupal\Core\Form\ConfigFormBase;
@@ -43,6 +44,7 @@ class GptAtEcConfigForm extends ConfigFormBase {
 
     $instance->httpClient = $container->get('http_client');
     $instance->keyRepository = $container->get('key.repository');
+    $instance->messenger = $container->get('messenger');
 
     return $instance;
   }
@@ -75,7 +77,7 @@ class GptAtEcConfigForm extends ConfigFormBase {
       '#key_filters' => ['type' => 'authentication'],
     ];
 
-    if ($api_key !== NULL) {
+    if ($form_state->getValue('api_key', $api_key) !== NULL) {
       $form['quota'] = $this->buildQuotaFieldset([], $form_state);
     }
 
@@ -93,8 +95,13 @@ class GptAtEcConfigForm extends ConfigFormBase {
       return;
     }
 
+    $key = $this->keyRepository->getKey($api_key);
+    if (!$key instanceof KeyInterface) {
+      return;
+    }
+
     try {
-      $client = $this->getClient($api_key);
+      $client = $this->getClient($key);
       $client->models()->list();
     }
     catch (\Exception $e) {
@@ -131,16 +138,22 @@ class GptAtEcConfigForm extends ConfigFormBase {
    */
   protected function buildQuotaFieldset(array $element, FormStateInterface $form_state): array {
     $api_key = $this->getConfigApiKey();
+    $key = $this->keyRepository->getKey($api_key);
 
     try {
-      $client = $this->getClient($api_key);
+      $client = $this->getClient($key);
       $models = array_map(
         static fn ($model) => $model['id'],
         $client->models()->list()->toArray()['data'] ?? [],
       );
       asort($models);
     }
-    catch (\Exception) {
+    catch (\Exception $e) {
+      $this->messenger->addError(
+        $this->t('An error occurred using the provided key. The error is: %message', [
+          '%message' => $e->getMessage(),
+        ]),
+      );
       $models = [];
     }
 
@@ -213,7 +226,7 @@ class GptAtEcConfigForm extends ConfigFormBase {
    */
   public function updateQuotaConsumption(array $form, FormStateInterface $form_state): void {
     try {
-      $client = $this->getClient($this->getConfigApiKey());
+      $client = $this->getClient($this->keyRepository->getKey($this->getConfigApiKey()));
       $usage = $client->quotaConsumption()->retrieve($form_state->getValue(['quota', 'model']))->toArray();
       $form_state->set('quota', $usage);
     }
@@ -251,20 +264,21 @@ class GptAtEcConfigForm extends ConfigFormBase {
    *   A string if a value is set, NULL otherwise.
    */
   protected function getConfigApiKey(): ?string {
-    return $this->config(GptAtEcProvider::CONFIG_NAME)->get('api_key');
+    $api_key_id = $this->config(GptAtEcProvider::CONFIG_NAME)->get('api_key');
+
+    return $api_key_id !== NULL && $this->keyRepository->getKey($api_key_id) ? $api_key_id : NULL;
   }
 
   /**
    * Creates an instance of the GPT@EC client.
    *
-   * @param string $api_key_id
-   *   The API key name.
+   * @param \Drupal\key\KeyInterface $key
+   *   The key entity.
    *
    * @return \Openeuropa\GptAtEcPhpClient\Client
    *   The client.
    */
-  protected function getClient(string $api_key_id): Client {
-    $key = $this->keyRepository->getKey($api_key_id);
+  protected function getClient(KeyInterface $key): Client {
     return (new Factory())
       ->withApiKey($key->getKeyValue())
       ->withHttpClient($this->httpClient)
