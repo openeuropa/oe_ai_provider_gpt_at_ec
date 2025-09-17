@@ -13,6 +13,10 @@ repositories: [
     "type": "git",
     "url": "https://github.com/brummbar/poc_oe_ai_provider_gpt_at_ec"
   },
+  {
+    "type": "git",
+    "url": "https://github.com/openeuropa/gpt-at-ec-php-client"
+  },
   ...
 ]
 ```
@@ -22,9 +26,28 @@ then execute:
 composer require openeuropa/oe_ai_provider_gpt_at_ec
 ```
 
-Install as you would normally install a contributed Drupal module. For further
-information, see
-[Installing Drupal Modules](https://www.drupal.org/docs/extending-drupal/installing-drupal-modules).
+Install and enable as you would normally install a contributed Drupal module. For
+further information, see [Installing Drupal Modules](https://www.drupal.org/docs/extending-drupal/installing-drupal-modules).
+
+## Configuration
+
+In order to use the provider, you need a GPT@EC key.\
+Once you have obtained one, the recommended approach is to set the value as environmental
+variable, e.g. `KEY_AI_GPT_AT_EC`.
+
+Log in as a user with administrative rights, and create a new key in Drupal by
+visiting `/admin/config/system/keys/add`:
+* _Key name_: any name easily identifiable.
+* _Key type_: set to `Authentication`.
+* _Key provider_: select `Environment`.
+* _Environment variable_: enter the variable name, e.g. as above `KEY_AI_GPT_AT_EC`.
+
+Save the new key. Now visit `/admin/config/ai/providers/gpt-at-ec`. Select the key
+previously created and save.\
+If the key was valid, you should see a success message and a list of models, for
+which you can check the quota consumption.
+
+Now you can use GPT@EC as provider for any AI module functionality.
 
 ## Development
 
