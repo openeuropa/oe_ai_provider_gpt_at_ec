@@ -10,15 +10,13 @@
         },
         {
             "type": "git",
-            "url": "git@github.com:brummbar/gpt-at-ec-php-client.git"
+            "url": "git@github.com:openeuropa/gpt-at-ec-php-client.git"
         }
     ],
     "require": {
         "drupal/ai": "^1.1",
         "drupal/key": "^1.20",
-        "openai-php/client": ">=v0.10.1",
-        "drupal/token": "^1.15",
-        "openeuropa/gpt-at-ec-php-client": "1.x-dev"
+        "openeuropa/gpt-at-ec-php-client": "~1.0.0-beta1"
     },
     "require-dev": {
         "drush/drush": "^12 || ^13"
