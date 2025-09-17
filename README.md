@@ -9,7 +9,7 @@ Add this repository to your composer.json:
 repositories: [
   {
     "type": "git",
-    "url": "https://github.com/brummbar/poc_oe_ai_provider_gpt_at_ec"
+    "url": "https://github.com/openeuropa/oe_ai_provider_gpt_at_ec"
   },
   {
     "type": "git",
