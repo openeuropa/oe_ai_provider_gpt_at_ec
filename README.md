@@ -2,8 +2,6 @@
 
 Enables the use of GPT@EC as provider for the Drupal AI module.
 
-:warning: This is a proof of concept.
-
 ## Installation
 
 Add this repository to your composer.json:
