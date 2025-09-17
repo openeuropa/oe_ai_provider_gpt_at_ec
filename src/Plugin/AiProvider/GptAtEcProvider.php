@@ -11,14 +11,12 @@ use Drupal\ai\OperationType\Chat\ChatInterface;
 use Drupal\ai\OperationType\Chat\ChatMessage;
 use Drupal\ai\OperationType\Chat\ChatOutput;
 use Drupal\ai\Traits\OperationType\ChatTrait;
-use Drupal\Core\Cache\MemoryCache\MemoryCacheInterface;
 use Drupal\Core\Config\ImmutableConfig;
 use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
 use Drupal\oe_ai_provider_gpt_at_ec\ChatMessageIterator;
 use Openeuropa\GptAtEcPhpClient\Client;
 use Openeuropa\GptAtEcPhpClient\Factory;
-use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\Yaml\Yaml;
 
 /**
@@ -40,24 +38,6 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    * @var \Openeuropa\GptAtEcPhpClient\Client
    */
   protected Client $client;
-
-  /**
-   * The memory cache backend.
-   *
-   * @var \Drupal\Core\Cache\MemoryCache\MemoryCacheInterface
-   */
-  protected MemoryCacheInterface $memoryCache;
-
-  /**
-   * {@inheritdoc}
-   */
-  public static function create(ContainerInterface $container, array $configuration, $plugin_id, $plugin_definition) {
-    $instance = parent::create($container, $configuration, $plugin_id, $plugin_definition);
-
-    $instance->memoryCache = $container->get('cache.oe_ai_provider_gpt_at_ec.memory');
-
-    return $instance;
-  }
 
   /**
    * {@inheritdoc}
@@ -210,12 +190,6 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    *   The list of available models.
    */
   protected function getAvailableModels(): array {
-    $cid = 'oe_ai_provider_gpt_at_ec_models';
-
-    if ($cache = $this->memoryCache->get($cid)) {
-      return $cache->data;
-    }
-
     $models = [];
     $list = $this->client->models()->list()->toArray();
     foreach ($list['data'] as $model) {
@@ -223,11 +197,6 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
     }
 
     asort($models);
-    $this->memoryCache->set(
-      $cid,
-      $models,
-      tags: $this->getConfig()->getCacheTags(),
-    );
 
     return $models;
   }

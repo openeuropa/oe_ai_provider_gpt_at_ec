@@ -1,7 +1,0 @@
-services:
-  cache.oe_ai_provider_gpt_at_ec.memory:
-    class: Drupal\Core\Cache\MemoryCache\MemoryCacheInterface
-    tags:
-      - { name: cache.bin.memory, default_backend: cache.backend.memory.memory }
-    factory: [ '@cache_factory', 'get' ]
-    arguments: [ oe_ai_provider_gpt_at_ec.memory ]
