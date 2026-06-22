@@ -10,7 +10,9 @@ use Drupal\ai\OperationType\Chat\ChatInput;
 use Drupal\ai\OperationType\Chat\ChatInterface;
 use Drupal\ai\OperationType\Chat\ChatMessage;
 use Drupal\ai\OperationType\Chat\ChatOutput;
+use Drupal\ai\OperationType\Chat\Tools\ToolsFunctionOutput;
 use Drupal\ai\Traits\OperationType\ChatTrait;
+use Drupal\Component\Serialization\Json;
 use Drupal\Core\Config\ImmutableConfig;
 use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
@@ -132,10 +134,22 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
 
       /** @var \Drupal\ai\OperationType\Chat\ChatMessage $message */
       foreach ($input->getMessages() as $message) {
-        $chat_input[] = [
+        $new_message = [
           'role' => $message->getRole(),
           'content' => $message->getText(),
         ];
+
+        // If it's a tool's response.
+        if ($message->getToolsId()) {
+          $new_message['tool_call_id'] = $message->getToolsId();
+        }
+
+        // If we want the results from some older tools call.
+        if ($message->getTools()) {
+          $new_message['tool_calls'] = $message->getRenderedTools();
+        }
+
+        $chat_input[] = $new_message;
       }
     }
 
@@ -144,6 +158,22 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
       'messages' => $chat_input,
     ] + $this->configuration;
 
+    // Pass any tools (function calling) definitions to the model.
+    if (is_object($input) && method_exists($input, 'getChatTools') && $input->getChatTools()) {
+      $payload['tools'] = $input->getChatTools()->renderToolsArray();
+      foreach ($payload['tools'] as $key => $tool) {
+        $payload['tools'][$key]['function']['strict'] = FALSE;
+      }
+    }
+
+    // Pass any structured JSON schema (structured output) to the model.
+    if (is_object($input) && method_exists($input, 'getChatStructuredJsonSchema') && $input->getChatStructuredJsonSchema()) {
+      $payload['response_format'] = [
+        'type' => 'json_schema',
+        'json_schema' => $input->getChatStructuredJsonSchema(),
+      ];
+    }
+
     try {
       if ($this->streamed) {
         $response = $this->client->chat()->createStreamed($payload);
@@ -151,10 +181,25 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
       }
       else {
         $response = $this->client->chat()->create($payload)->toArray();
+        // Reconstruct any tool calls returned by the model.
+        $tools = [];
+        if (!empty($response['choices'][0]['message']['tool_calls'])) {
+          foreach ($response['choices'][0]['message']['tool_calls'] as $tool) {
+            $arguments = Json::decode($tool['function']['arguments']);
+            $tools[] = new ToolsFunctionOutput(
+              $input->getChatTools()->getFunctionByName($tool['function']['name']),
+              $tool['id'],
+              $arguments,
+            );
+          }
+        }
         $message = new ChatMessage(
           role: $response['choices'][0]['message']['role'],
           text: $response['choices'][0]['message']['content'] ?? '',
         );
+        if (!empty($tools)) {
+          $message->setTools($tools);
+        }
       }
     }
     catch (\Exception $e) {
