@@ -7,10 +7,6 @@
         {
             "type": "composer",
             "url": "https://packages.drupal.org/8"
-        },
-        {
-            "type": "git",
-            "url": "git@github.com:openeuropa/gpt-at-ec-php-client.git"
         }
     ],
     "require": {
