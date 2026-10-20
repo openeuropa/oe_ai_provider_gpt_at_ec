@@ -440,7 +440,13 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
         if ($input instanceof ChatInput && $input->getChatTools()) {
           $function = $input->getChatTools()->getFunctionByName($item['name'] ?? '');
         }
-        $tools[] = new ToolsFunctionOutput($function, $item['call_id'] ?? ($item['id'] ?? ''), $arguments);
+        $tool = new ToolsFunctionOutput($function, $item['call_id'] ?? ($item['id'] ?? ''), $arguments);
+        // The model can call a tool that was not offered: the name is then
+        // only known from the response.
+        if ($function === NULL) {
+          $tool->setName($item['name'] ?? '');
+        }
+        $tools[] = $tool;
       }
     }
 
