@@ -7,6 +7,12 @@ namespace Drupal\oe_ai_provider_gpt_at_ec\Plugin\AiProvider;
 use Drupal\ai\Attribute\AiProvider;
 use Drupal\ai\Base\AiProviderClientBase;
 use Drupal\ai\Dto\TokenUsageDto;
+use Drupal\ai\Exception\AiAccessDeniedException;
+use Drupal\ai\Exception\AiBadRequestException;
+use Drupal\ai\Exception\AiExceptionInterface;
+use Drupal\ai\Exception\AiQuotaException;
+use Drupal\ai\Exception\AiRateLimitException;
+use Drupal\ai\Exception\AiResponseErrorException;
 use Drupal\ai\OperationType\Chat\ChatInput;
 use Drupal\ai\OperationType\Chat\ChatInterface;
 use Drupal\ai\OperationType\Chat\ChatMessage;
@@ -20,6 +26,7 @@ use Drupal\Core\Config\ImmutableConfig;
 use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
 use Drupal\oe_ai_provider_gpt_at_ec\ChatMessageIterator;
+use OpenAI\Exceptions\ErrorException;
 use Openeuropa\GptAtEcPhpClient\Client;
 use Openeuropa\GptAtEcPhpClient\Factory;
 use Symfony\Component\Yaml\Yaml;
@@ -181,10 +188,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
       }
     }
     catch (\Exception $e) {
-      // @todo We currently don't know which exceptions are thrown and what are
-      //   their messages, so we just rethrow the normal exception.
-      //   This try/catch block is therefor useless.
-      throw $e;
+      throw $this->convertClientException($e);
     }
 
     $chat_output = new ChatOutput($message, $response, []);
@@ -475,6 +479,38 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
       reasoning: $usage['output_tokens_details']['reasoning_tokens'] ?? NULL,
       cached: $usage['input_tokens_details']['cached_tokens'] ?? NULL,
     ));
+  }
+
+  /**
+   * Converts an exception thrown by the GPT@EC client to an AI exception.
+   *
+   * @param \Exception $exception
+   *   The exception thrown while talking to the gateway.
+   *
+   * @return \Exception
+   *   The AI module exception, wrapping the original one.
+   */
+  protected function convertClientException(\Exception $exception): \Exception {
+    // Already converted, e.g. by the iterator while consuming a stream.
+    if ($exception instanceof AiExceptionInterface) {
+      return $exception;
+    }
+
+    $message = $exception->getMessage();
+    if (!$exception instanceof ErrorException) {
+      // Transport failures and unreadable responses.
+      return new AiResponseErrorException($message, (int) $exception->getCode(), $exception);
+    }
+
+    // Keep the HTTP status as the exception code, for consumers that check it.
+    $status = $exception->getStatusCode();
+    return match (TRUE) {
+      str_contains(strtolower($message), 'quota') => new AiQuotaException($message, $status, $exception),
+      $status === 429 => new AiRateLimitException($message, $status, $exception),
+      $status === 401, $status === 403 => new AiAccessDeniedException($message, $status, $exception),
+      $status >= 400 && $status < 500 => new AiBadRequestException($message, $status, $exception),
+      default => new AiResponseErrorException($message, $status, $exception),
+    };
   }
 
   /**
