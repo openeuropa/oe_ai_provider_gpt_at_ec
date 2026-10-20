@@ -5,11 +5,28 @@ declare(strict_types=1);
 namespace Drupal\oe_ai_provider_gpt_at_ec;
 
 use Drupal\ai\OperationType\Chat\StreamedChatMessageIterator;
+use Psr\Log\LoggerInterface;
 
 /**
  * A streamed chat message iterator for GPT@EC AI.
  */
 final class ChatMessageIterator extends StreamedChatMessageIterator {
+
+  /**
+   * Constructs a ChatMessageIterator.
+   *
+   * @param \Traversable $iterator
+   *   The streamed response.
+   * @param \Psr\Log\LoggerInterface|null $logger
+   *   The logger used to report failed streams. Optional, as the interface
+   *   defines the constructor.
+   */
+  public function __construct(
+    \Traversable $iterator,
+    protected ?LoggerInterface $logger = NULL,
+  ) {
+    parent::__construct($iterator);
+  }
 
   /**
    * {@inheritdoc}
@@ -48,6 +65,7 @@ final class ChatMessageIterator extends StreamedChatMessageIterator {
         case 'response.incomplete':
         case 'response.failed':
           $response = $payload['response'] ?? [];
+          $this->logUnsuccessfulResponse($event, $response);
           $usage = $response['usage'] ?? [];
           $message = $this->createStreamedChatMessage('assistant', '', [], NULL, $chunk);
           if (!empty($usage)) {
@@ -61,11 +79,46 @@ final class ChatMessageIterator extends StreamedChatMessageIterator {
           yield $message;
           break;
 
+        // An error raised by the server while streaming.
+        case 'error':
+          $this->logger?->error('The GPT@EC streamed response reported an error: @message (code: @code).', [
+            '@message' => $payload['message'] ?? 'unknown error',
+            '@code' => $payload['code'] ?? 'none',
+          ]);
+          break;
+
         default:
           // Other lifecycle events (created, in_progress, content_part.*,
           // *.done, etc.) are not surfaced to the consumer.
           break;
       }
+    }
+  }
+
+  /**
+   * Logs a terminal response event that did not complete successfully.
+   *
+   * Without this, a failed or truncated stream silently ends with partial or
+   * empty text.
+   *
+   * @param string $event
+   *   The terminal event name.
+   * @param array $response
+   *   The response carried by the event.
+   */
+  protected function logUnsuccessfulResponse(string $event, array $response): void {
+    if ($event === 'response.failed') {
+      $this->logger?->error('The GPT@EC streamed response @id failed: @message (code: @code).', [
+        '@id' => $response['id'] ?? '',
+        '@message' => $response['error']['message'] ?? 'unknown error',
+        '@code' => $response['error']['code'] ?? 'none',
+      ]);
+    }
+    elseif ($event === 'response.incomplete') {
+      $this->logger?->warning('The GPT@EC streamed response @id is incomplete: @reason.', [
+        '@id' => $response['id'] ?? '',
+        '@reason' => $response['incomplete_details']['reason'] ?? 'unknown reason',
+      ]);
     }
   }
 

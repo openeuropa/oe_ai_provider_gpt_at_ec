@@ -155,13 +155,13 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
     try {
       if ($this->streamed) {
         $response = $this->client->responses()->createStreamed($payload);
-        $message = new ChatMessageIterator($response);
+        $message = new ChatMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
       }
       // If we are in a fibre, we use a streamed response as the SDK doesn't
       // support direct async.
       elseif (\Fiber::getCurrent()) {
         $response = $this->client->responses()->createStreamed($payload);
-        $stream = new ChatMessageIterator($response);
+        $stream = new ChatMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
         // We consume the stream in a fiber, suspending after each chunk until
         // the stream signals it has finished.
         foreach ($stream as $chunk) {
