@@ -10,7 +10,7 @@
         }
     ],
     "require": {
-        "drupal/ai": "^1.1",
+        "drupal/ai": "^1.2",
         "drupal/key": "^1.20",
         "openeuropa/gpt-at-ec-php-client": "^1.0.0-beta3"
     },
