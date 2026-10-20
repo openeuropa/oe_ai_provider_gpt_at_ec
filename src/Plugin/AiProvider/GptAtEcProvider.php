@@ -25,6 +25,7 @@ use Drupal\Component\Serialization\Json;
 use Drupal\Core\Config\ImmutableConfig;
 use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
+use Drupal\oe_ai_provider_gpt_at_ec\ChatCompletionsMessageIterator;
 use Drupal\oe_ai_provider_gpt_at_ec\ChatMessageIterator;
 use OpenAI\Exceptions\ErrorException;
 use Openeuropa\GptAtEcPhpClient\Client;
@@ -130,6 +131,12 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    */
   public function chat(array|string|ChatInput $input, string $model_id, array $tags = []): ChatOutput {
     $this->loadClient();
+
+    // GPT@EC rejects the models it does not serve on the Responses endpoint,
+    // so those still go through Chat Completions.
+    if (!$this->supportsResponses($model_id)) {
+      return $this->chatCompletions($input, $model_id);
+    }
 
     // Normalize the input into the Responses API "input" structure. A plain
     // string or an already built array is passed through as is.
@@ -439,18 +446,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
         }
       }
       elseif ($type === 'function_call') {
-        $arguments = Json::decode($item['arguments'] ?? '') ?: [];
-        $function = NULL;
-        if ($input instanceof ChatInput && $input->getChatTools()) {
-          $function = $input->getChatTools()->getFunctionByName($item['name'] ?? '');
-        }
-        $tool = new ToolsFunctionOutput($function, $item['call_id'] ?? ($item['id'] ?? ''), $arguments);
-        // The model can call a tool that was not offered: the name is then
-        // only known from the response.
-        if ($function === NULL) {
-          $tool->setName($item['name'] ?? '');
-        }
-        $tools[] = $tool;
+        $tools[] = $this->buildToolsFunctionOutput($item['call_id'] ?? ($item['id'] ?? ''), $item['name'] ?? '', $item['arguments'] ?? '', $input);
       }
     }
 
@@ -479,6 +475,219 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
       reasoning: $usage['output_tokens_details']['reasoning_tokens'] ?? NULL,
       cached: $usage['input_tokens_details']['cached_tokens'] ?? NULL,
     ));
+  }
+
+  /**
+   * Determines whether GPT@EC serves a model on the Responses endpoint.
+   *
+   * Verified against the gateway on 2026-10-20: the GPT models are served,
+   * while the Mistral ones are rejected as not supporting the Responses API.
+   *
+   * @param string $model_id
+   *   The model ID.
+   *
+   * @return bool
+   *   TRUE if the model can be used on the Responses endpoint.
+   */
+  protected function supportsResponses(string $model_id): bool {
+    return str_starts_with(strtolower($model_id), 'gpt-');
+  }
+
+  /**
+   * Runs a chat request on the Chat Completions endpoint.
+   *
+   * Used for the models that do not support the Responses API. File
+   * attachments are not sent.
+   *
+   * @param array|string|\Drupal\ai\OperationType\Chat\ChatInput $input
+   *   The chat input.
+   * @param string $model_id
+   *   The model ID.
+   *
+   * @return \Drupal\ai\OperationType\Chat\ChatOutput
+   *   The chat output.
+   */
+  protected function chatCompletions(array|string|ChatInput $input, string $model_id): ChatOutput {
+    $messages = $input;
+    if ($input instanceof ChatInput) {
+      $messages = $this->buildChatCompletionsMessages($input);
+    }
+
+    $payload = [
+      'model' => $model_id,
+      'messages' => $messages,
+    ] + $this->prepareChatCompletionsConfiguration();
+
+    // Pass any tools (function calling) definitions to the model.
+    if ($input instanceof ChatInput && $input->getChatTools()) {
+      $payload['tools'] = $input->getChatTools()->renderToolsArray();
+      foreach ($payload['tools'] as $key => $tool) {
+        $payload['tools'][$key]['function']['strict'] = FALSE;
+      }
+    }
+
+    // Pass any structured JSON schema (structured output) to the model.
+    if ($input instanceof ChatInput && $input->getChatStructuredJsonSchema()) {
+      $payload['response_format'] = [
+        'type' => 'json_schema',
+        'json_schema' => $input->getChatStructuredJsonSchema(),
+      ];
+    }
+
+    try {
+      if ($this->streamed) {
+        $response = $this->client->chat()->createStreamed($payload);
+        $message = new ChatCompletionsMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
+      }
+      else {
+        $response = $this->client->chat()->create($payload)->toArray();
+        $message = $this->extractChatCompletionsMessage($response, $input);
+      }
+    }
+    catch (\Exception $e) {
+      throw $this->convertClientException($e);
+    }
+
+    $chat_output = new ChatOutput($message, $response, []);
+
+    // For streamed responses the iterator sets the usage itself.
+    if (!$this->streamed) {
+      $usage = $response['usage'] ?? [];
+      $chat_output->setTokenUsage(new TokenUsageDto(
+        input: $usage['prompt_tokens'] ?? NULL,
+        output: $usage['completion_tokens'] ?? NULL,
+        total: $usage['total_tokens'] ?? NULL,
+        reasoning: $usage['completion_tokens_details']['reasoning_tokens'] ?? NULL,
+        cached: $usage['prompt_tokens_details']['cached_tokens'] ?? NULL,
+      ));
+    }
+
+    return $chat_output;
+  }
+
+  /**
+   * Builds the Chat Completions "messages" array from a ChatInput object.
+   *
+   * @param \Drupal\ai\OperationType\Chat\ChatInput $input
+   *   The chat input.
+   *
+   * @return array
+   *   The Chat Completions messages.
+   */
+  protected function buildChatCompletionsMessages(ChatInput $input): array {
+    $messages = [];
+
+    // The system prompt set on the input takes precedence over the deprecated
+    // one set on the provider.
+    $system_prompt = $input->getSystemPrompt() ?: $this->chatSystemRole;
+    if ($system_prompt) {
+      $messages[] = [
+        'role' => 'system',
+        'content' => $system_prompt,
+      ];
+    }
+
+    /** @var \Drupal\ai\OperationType\Chat\ChatMessage $message */
+    foreach ($input->getMessages() as $message) {
+      $item = [
+        'role' => $message->getRole(),
+        'content' => $message->getText(),
+      ];
+
+      // If it's a tool's response.
+      if ($message->getToolsId()) {
+        $item['tool_call_id'] = $message->getToolsId();
+      }
+
+      // If we want the results from some older tools call.
+      if ($message->getTools()) {
+        $item['tool_calls'] = $message->getRenderedTools();
+      }
+
+      $messages[] = $item;
+    }
+
+    return $messages;
+  }
+
+  /**
+   * Prepares the provider configuration for the Chat Completions endpoint.
+   *
+   * @return array
+   *   The Chat Completions compatible configuration.
+   */
+  protected function prepareChatCompletionsConfiguration(): array {
+    $config = $this->configuration;
+
+    // The output cap setting is named after the Responses API, Chat
+    // Completions calls it "max_tokens".
+    if (isset($config['max_output_tokens'])) {
+      $config['max_tokens'] = $config['max_output_tokens'];
+      unset($config['max_output_tokens']);
+    }
+
+    return $config;
+  }
+
+  /**
+   * Builds a ChatMessage from a non-streamed Chat Completions result.
+   *
+   * @param array $response
+   *   The decoded Chat Completions response.
+   * @param array|string|\Drupal\ai\OperationType\Chat\ChatInput $input
+   *   The original chat input (used to resolve tool definitions).
+   *
+   * @return \Drupal\ai\OperationType\Chat\ChatMessage
+   *   The chat message.
+   */
+  protected function extractChatCompletionsMessage(array $response, array|string|ChatInput $input): ChatMessage {
+    $choice = $response['choices'][0]['message'] ?? [];
+
+    $tools = [];
+    foreach ($choice['tool_calls'] ?? [] as $tool_call) {
+      $tools[] = $this->buildToolsFunctionOutput($tool_call['id'] ?? '', $tool_call['function']['name'] ?? '', $tool_call['function']['arguments'] ?? '', $input);
+    }
+
+    $message = new ChatMessage($choice['role'] ?? 'assistant', $choice['content'] ?? '');
+    if (!empty($tools)) {
+      $message->setTools($tools);
+    }
+
+    return $message;
+  }
+
+  /**
+   * Builds the output of a tool call returned by the model.
+   *
+   * @param string $tool_id
+   *   The tool call ID.
+   * @param string $name
+   *   The name of the called tool.
+   * @param string $arguments
+   *   The JSON encoded arguments.
+   * @param array|string|\Drupal\ai\OperationType\Chat\ChatInput $input
+   *   The original chat input (used to resolve tool definitions).
+   *
+   * @return \Drupal\ai\OperationType\Chat\Tools\ToolsFunctionOutput
+   *   The tool output.
+   */
+  protected function buildToolsFunctionOutput(string $tool_id, string $name, string $arguments, array|string|ChatInput $input): ToolsFunctionOutput {
+    $function = NULL;
+    if ($input instanceof ChatInput && $input->getChatTools()) {
+      $function = $input->getChatTools()->getFunctionByName($name);
+    }
+
+    // Invalid JSON arguments (seen with mistral-small) are dropped rather than
+    // breaking the whole response.
+    $decoded = Json::decode($arguments);
+    $tool = new ToolsFunctionOutput($function, $tool_id, is_array($decoded) ? $decoded : []);
+    // The model can call a tool that was not offered: the name is then only
+    // known from the response.
+    if ($function === NULL) {
+      $tool->setName($name);
+    }
+
+    return $tool;
   }
 
   /**
