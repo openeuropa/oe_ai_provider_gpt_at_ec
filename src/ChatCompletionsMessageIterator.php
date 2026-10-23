@@ -64,6 +64,12 @@ final class ChatCompletionsMessageIterator extends StreamedChatMessageIterator {
 
         yield $message;
       }
+
+      // A stream closed before the finish reason would otherwise silently end
+      // with partial or empty text.
+      if ($this->getFinishReason() === NULL) {
+        $this->logger?->error('The GPT@EC streamed chat completion ended without a finish reason, the answer may be incomplete.');
+      }
     }
     catch (\Exception $e) {
       // The request was accepted, so anything failing while the stream is read

@@ -34,6 +34,7 @@ final class ChatMessageIterator extends StreamedChatMessageIterator {
    */
   public function doIterate(): \Generator {
     try {
+      $error_reported = FALSE;
       foreach ($this->iterator->getIterator() as $data) {
         $chunk = $data->toArray();
         $event = $chunk['event'] ?? '';
@@ -87,6 +88,7 @@ final class ChatMessageIterator extends StreamedChatMessageIterator {
               '@message' => $payload['message'] ?? 'unknown error',
               '@code' => $payload['code'] ?? 'none',
             ]);
+            $error_reported = TRUE;
             break;
 
           default:
@@ -94,6 +96,12 @@ final class ChatMessageIterator extends StreamedChatMessageIterator {
             // *.done, etc.) are not surfaced to the consumer.
             break;
         }
+      }
+
+      // GPT@EC sometimes closes the stream before the terminal event, which
+      // would otherwise silently end with partial or empty text.
+      if ($this->getFinishReason() === NULL && !$error_reported) {
+        $this->logger?->error('The GPT@EC streamed response ended without a terminal event, the answer may be incomplete.');
       }
     }
     catch (\Exception $e) {
