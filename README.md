@@ -47,6 +47,23 @@ which you can check the quota consumption.
 
 Now you can use GPT@EC as provider for any AI module functionality.
 
+## Chat endpoint
+
+Chat operations with the GPT models (`gpt-*`) are sent to the GPT@EC Responses
+endpoint (`/responses`). Previous versions used the Chat Completions endpoint
+(`/chat/completions`) for all models.
+
+GPT@EC does not serve the other models, such as the Mistral ones, on the
+Responses endpoint, so they still use the Chat Completions endpoint.
+
+The switch brings the following changes:
+* The `max_tokens` chat setting is renamed to `max_output_tokens`. Configuration
+  saved with `max_tokens` keeps working, but it should be updated to the new
+  name.
+* Images and PDF documents can be attached to chat messages sent to GPT models.
+  They are sent inline, as GPT@EC has no file upload endpoint. Attachments are
+  not sent to the other models.
+
 ## Development
 
 Inside the cloned project run:
