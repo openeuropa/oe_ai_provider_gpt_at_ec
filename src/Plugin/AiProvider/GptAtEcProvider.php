@@ -46,6 +46,35 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
   public const string CONFIG_NAME = 'oe_ai_provider_gpt_at_ec.settings';
 
   /**
+   * The reasoning behavior of the models that reason, keyed by model ID.
+   *
+   * - efforts: the values GPT@EC accepts for "reasoning.effort".
+   * - default: the effort the model uses when none is sent.
+   * - sampling_needs_effort_none: TRUE when the model rejects "temperature"
+   *   and "top_p" unless the effort is "none".
+   *
+   * Verified against the gateway. The keys are the model IDs that /models
+   * returns.
+   */
+  protected const array REASONING_MODELS = [
+    'gpt-5.1' => [
+      'efforts' => ['none', 'low', 'medium', 'high'],
+      'default' => 'none',
+      'sampling_needs_effort_none' => TRUE,
+    ],
+    'gpt-5.6-terra-api' => [
+      'efforts' => ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      'default' => 'medium',
+      'sampling_needs_effort_none' => TRUE,
+    ],
+    'gpt-oss-120b' => [
+      'efforts' => ['low', 'medium', 'high'],
+      'default' => 'medium',
+      'sampling_needs_effort_none' => FALSE,
+    ],
+  ];
+
+  /**
    * The GPT@EC PHP client.
    *
    * @var \Openeuropa\GptAtEcPhpClient\Client
@@ -101,6 +130,38 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    * {@inheritdoc}
    */
   public function getModelSettings(string $model_id, array $generalConfig = []): array {
+    $reasoning = $this->getReasoningSettings($model_id);
+    if ($reasoning === NULL) {
+      return $generalConfig;
+    }
+
+    $generalConfig['reasoning_effort'] = [
+      'label' => 'Reasoning effort',
+      'description' => 'Controls how much the model reasons before it answers. More reasoning can give better answers to difficult tasks. It also takes more time and uses more tokens.',
+      'type' => 'string',
+      'default' => $reasoning['default'],
+      'required' => FALSE,
+      'constraints' => [
+        'options' => $reasoning['efforts'],
+      ],
+    ];
+
+    if ($reasoning['sampling_needs_effort_none']) {
+      // A model that reasons by default would reject the sampling settings
+      // on every request, so they are not offered, as the OpenAI provider
+      // does for its reasoning models.
+      if ($reasoning['default'] !== 'none') {
+        unset($generalConfig['temperature'], $generalConfig['top_p']);
+      }
+      else {
+        foreach (['temperature', 'top_p'] as $key) {
+          if (isset($generalConfig[$key])) {
+            $generalConfig[$key]['description'] = trim(($generalConfig[$key]['description'] ?? '') . ' This setting applies only when the reasoning effort is "none".');
+          }
+        }
+      }
+    }
+
     return $generalConfig;
   }
 
@@ -148,7 +209,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
     $payload = [
       'model' => $model_id,
       'input' => $responses_input,
-    ] + $this->prepareResponsesConfiguration();
+    ] + $this->prepareResponsesConfiguration($model_id);
 
     // Pass any tools (function calling) definitions to the model.
     if ($input instanceof ChatInput && $input->getChatTools()) {
@@ -285,7 +346,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
   protected function buildResponsesMessageItem(ChatMessage $message): array {
     // Only images and PDF documents can be attached, both inlined as data
     // URIs: GPT@EC has no file upload endpoint. Verified against the gateway
-    // on 2026-09-10 with gpt-5.1.
+    // with gpt-5.1.
     $parts = [];
     foreach ($message->getFiles() as $file) {
       if ($file instanceof ImageFile) {
@@ -333,12 +394,15 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    * Prepares the provider configuration for the Responses endpoint.
    *
    * Translates Chat Completions configuration keys to their Responses API
-   * equivalents.
+   * equivalents, and drops the parameters the model rejects.
+   *
+   * @param string $model_id
+   *   The model ID.
    *
    * @return array
    *   The Responses-compatible configuration.
    */
-  protected function prepareResponsesConfiguration(): array {
+  protected function prepareResponsesConfiguration(string $model_id): array {
     $config = $this->configuration;
 
     // The Responses API uses "max_output_tokens" for the output cap. Map the
@@ -350,7 +414,37 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
       unset($config['max_tokens']);
     }
 
+    // The Responses API uses "reasoning.effort" for the effort. If the caller
+    // already sets "reasoning.effort", the module keeps that value. When the
+    // user selects no effort, the forms send an empty string.
+    if (!empty($config['reasoning_effort']) && empty($config['reasoning']['effort'])) {
+      $config['reasoning']['effort'] = $config['reasoning_effort'];
+    }
+    unset($config['reasoning_effort']);
+
+    // Some models reject the sampling parameters while they reason. The
+    // forms send 0.0 for an empty field, so empty fields do not prevent the
+    // error.
+    $reasoning = $this->getReasoningSettings($model_id);
+    if ($reasoning !== NULL && $reasoning['sampling_needs_effort_none'] && ($config['reasoning']['effort'] ?? $reasoning['default']) !== 'none') {
+      unset($config['temperature'], $config['top_p']);
+    }
+
     return $config;
+  }
+
+  /**
+   * Returns the reasoning behavior of a model.
+   *
+   * @param string $model_id
+   *   The model ID.
+   *
+   * @return array{efforts: list<string>, default: string, sampling_needs_effort_none: bool}|null
+   *   The reasoning behavior, see self::REASONING_MODELS, or NULL if the
+   *   model is not in that list.
+   */
+  protected function getReasoningSettings(string $model_id): ?array {
+    return static::REASONING_MODELS[strtolower($model_id)] ?? NULL;
   }
 
   /**
@@ -480,7 +574,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
   /**
    * Determines whether GPT@EC serves a model on the Responses endpoint.
    *
-   * Verified against the gateway on 2026-10-20: the GPT models are served,
+   * Verified against the gateway: the GPT models are served,
    * while the Mistral ones are rejected as not supporting the Responses API.
    *
    * @param string $model_id

@@ -1,0 +1,47 @@
+{
+  "id": "resp_0123456789abcdef0123456789abcdef",
+  "created_at": 1788968400.0,
+  "metadata": {},
+  "model": "gpt-5.1-PTU-API",
+  "object": "response",
+  "output": [
+    {
+      "id": "msg_0123456789abcdef0123456789abcdef",
+      "content": [
+        {
+          "annotations": [],
+          "text": "Hello!",
+          "type": "output_text",
+          "logprobs": []
+        }
+      ],
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "temperature": 1.0,
+  "tool_choice": "auto",
+  "tools": [],
+  "top_p": 1.0,
+  "status": "completed",
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 8,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 3,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 11
+  }
+}
