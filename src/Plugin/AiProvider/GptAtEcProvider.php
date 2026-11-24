@@ -416,7 +416,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    *   The Responses-compatible configuration.
    */
   protected function prepareResponsesConfiguration(string $model_id): array {
-    $config = $this->configuration;
+    $config = $this->removeEmptyFieldValues($this->configuration);
 
     // The Responses API uses "max_output_tokens" for the output cap. Map the
     // Chat Completions key so existing stored configuration keeps working.
@@ -464,6 +464,29 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    */
   protected function getReasoningSettings(string $model_id): ?array {
     return static::REASONING_MODELS[strtolower($model_id)] ?? NULL;
+  }
+
+  /**
+   * Removes the values that the forms send for empty fields.
+   *
+   * The forms send 0 for an empty number field, which the gateway rejects as
+   * the output cap and, for most models, as "top_p". A temperature of 0 is
+   * valid.
+   *
+   * @param array $config
+   *   The provider configuration.
+   *
+   * @return array
+   *   The configuration without those values.
+   */
+  protected function removeEmptyFieldValues(array $config): array {
+    foreach (['max_output_tokens', 'max_tokens', 'top_p'] as $key) {
+      if (isset($config[$key]) && $config[$key] <= 0) {
+        unset($config[$key]);
+      }
+    }
+
+    return $config;
   }
 
   /**
@@ -746,7 +769,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    *   The Chat Completions compatible configuration.
    */
   protected function prepareChatCompletionsConfiguration(): array {
-    $config = $this->configuration;
+    $config = $this->removeEmptyFieldValues($this->configuration);
 
     // The output cap setting is named after the Responses API, Chat
     // Completions calls it "max_tokens".
