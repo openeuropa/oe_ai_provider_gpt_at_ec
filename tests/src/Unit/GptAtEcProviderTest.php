@@ -10,6 +10,7 @@ use Drupal\Core\Config\ImmutableConfig;
 use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\File\FileSystemInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
+use Drupal\Core\Logger\LoggerChannelInterface;
 use Drupal\ai\Exception\AiResponseErrorException;
 use Drupal\ai\OperationType\Chat\ChatInput;
 use Drupal\ai\OperationType\Chat\ChatMessage;
@@ -33,6 +34,11 @@ use Symfony\Component\Yaml\Yaml;
 
 /**
  * Tests the model settings and the payload of the GPT@EC provider.
+ *
+ * The annotations are for PHPUnit 9 on Drupal 10, which ignores attributes.
+ *
+ * @covers \Drupal\oe_ai_provider_gpt_at_ec\Plugin\AiProvider\GptAtEcProvider
+ * @group oe_ai_provider_gpt_at_ec
  */
 #[CoversClass(GptAtEcProvider::class)]
 #[Group('oe_ai_provider_gpt_at_ec')]
@@ -44,6 +50,13 @@ class GptAtEcProviderTest extends UnitTestCase {
    * @var array<int, array{request: \Psr\Http\Message\RequestInterface}>
    */
   protected array $history = [];
+
+  /**
+   * The "@message" placeholders of the messages logged by the provider.
+   *
+   * @var string[]
+   */
+  protected array $logs = [];
 
   /**
    * Tests the settings offered per model.
@@ -91,6 +104,8 @@ class GptAtEcProviderTest extends UnitTestCase {
    *   The provider configuration.
    * @param array $expected
    *   The expected configuration in the request body.
+   *
+   * @dataProvider providerChatPayload
    */
   #[DataProvider('providerChatPayload')]
   public function testChatPayload(string $model_id, array $configuration, array $expected): void {
@@ -166,6 +181,27 @@ class GptAtEcProviderTest extends UnitTestCase {
       $sampling + ['reasoning_effort' => 'high'],
       $sampling + ['reasoning' => ['effort' => 'high']],
     ];
+    yield 'an effort the model rejects is dropped' => [
+      'gpt-5.1',
+      $sampling + ['reasoning_effort' => 'xhigh'],
+      $sampling,
+    ];
+    yield 'the effort of a model not in the list is sent' => [
+      'gpt-5.9',
+      ['reasoning_effort' => 'xhigh'],
+      ['reasoning' => ['effort' => 'xhigh']],
+    ];
+    // JSON encodes the temperature 0.0 as 0.
+    yield 'the 0 that the forms send for empty fields is dropped, except for the temperature' => [
+      'gpt-oss-120b',
+      ['max_output_tokens' => 0, 'top_p' => 0.0, 'temperature' => 0.0],
+      ['temperature' => 0],
+    ];
+    yield 'a stored "max_tokens" of 0 is dropped' => [
+      'gpt-5.1',
+      ['max_tokens' => 0],
+      [],
+    ];
   }
 
   /**
@@ -177,6 +213,8 @@ class GptAtEcProviderTest extends UnitTestCase {
    *   The reply of the gateway, relative to the fixtures directory.
    * @param string $path
    *   The expected endpoint.
+   *
+   * @dataProvider providerToolSchema
    */
   #[DataProvider('providerToolSchema')]
   public function testToolSchema(string $model_id, string $fixture, string $path): void {
@@ -190,6 +228,15 @@ class GptAtEcProviderTest extends UnitTestCase {
             'description' => 'The city name.',
             'required' => TRUE,
           ]),
+          new ToolsPropertyInput('location', [
+            'type' => 'object',
+            'description' => 'The coordinates of the city.',
+            'properties' => [
+              new ToolsPropertyInput('latitude', ['type' => 'number', 'required' => TRUE]),
+              new ToolsPropertyInput('longitude', ['type' => 'number', 'required' => TRUE]),
+              new ToolsPropertyInput('altitude', ['type' => 'number', 'required' => FALSE]),
+            ],
+          ]),
         ],
       ]),
     ]));
@@ -202,14 +249,24 @@ class GptAtEcProviderTest extends UnitTestCase {
     $tool = $body['tools'][0];
     // Chat Completions nests the definition under "function".
     $parameters = $tool['function']['parameters'] ?? $tool['parameters'];
-    // The "name" and boolean "required" keys of the property are removed, the
-    // "required" list of the object is kept.
+    // The "name" and boolean "required" keys of the properties are removed;
+    // each object lists its required properties in "required".
     $this->assertSame([
       'type' => 'object',
       'properties' => [
         'city' => [
           'type' => 'string',
           'description' => 'The city name.',
+        ],
+        'location' => [
+          'type' => 'object',
+          'description' => 'The coordinates of the city.',
+          'properties' => [
+            'latitude' => ['type' => 'number'],
+            'longitude' => ['type' => 'number'],
+            'altitude' => ['type' => 'number'],
+          ],
+          'required' => ['latitude', 'longitude'],
         ],
       ],
       'required' => ['city'],
@@ -228,13 +285,19 @@ class GptAtEcProviderTest extends UnitTestCase {
    * Tests a plain text input on the Chat Completions endpoint.
    */
   public function testChatCompletionsPlainText(): void {
-    $output = $this->createProvider('chat/create.json')->chat('Hello', 'mistral-medium-3.5-128b-api');
+    $provider = $this->createProvider('chat/create.json');
+    $provider->setConfiguration(['max_output_tokens' => 0, 'top_p' => 0.0, 'temperature' => 0.0]);
+    $output = $provider->chat('Hello', 'mistral-medium-3.5-128b-api');
 
     $this->assertSame('Hello!', $output->getNormalized()->getText());
     $request = $this->history[0]['request'];
     $this->assertSame('/ecgpt/v1/chat/completions', $request->getUri()->getPath());
     $body = json_decode((string) $request->getBody(), TRUE, flags: JSON_THROW_ON_ERROR);
-    $this->assertSame([['role' => 'user', 'content' => 'Hello']], $body['messages']);
+    $this->assertSame([
+      'model' => 'mistral-medium-3.5-128b-api',
+      'messages' => [['role' => 'user', 'content' => 'Hello']],
+      'temperature' => 0,
+    ], $body);
   }
 
   /**
@@ -246,16 +309,27 @@ class GptAtEcProviderTest extends UnitTestCase {
    *   Whether the reply is streamed.
    * @param string $body
    *   The body of the reply.
+   * @param class-string<\Error> $error
+   *   The PHP error that the client throws.
+   *
+   * @dataProvider providerUnreadableReply
    */
   #[DataProvider('providerUnreadableReply')]
-  public function testUnreadableReply(string $model_id, bool $streamed, string $body): void {
+  public function testUnreadableReply(string $model_id, bool $streamed, string $body, string $error): void {
     $provider = $this->createProvider(new Response(200, ['Content-Type' => $streamed ? 'text/event-stream' : 'application/json'], $body));
     $provider->streamedOutput($streamed);
 
-    $this->expectException(AiResponseErrorException::class);
-    $output = $provider->chat('Hello', $model_id);
-    // A stream is read only when it is iterated.
-    foreach ($output->getNormalized() as $chunk) {
+    try {
+      $output = $provider->chat('Hello', $model_id);
+      // A stream is read only when it is iterated.
+      foreach ($output->getNormalized() as $chunk) {
+      }
+      $this->fail('No exception was thrown.');
+    }
+    catch (AiResponseErrorException $e) {
+      $this->assertInstanceOf($error, $e->getPrevious());
+      $this->assertSame(GptAtEcProvider::UNREADABLE_REPLY_MESSAGE, $e->getMessage());
+      $this->assertContains($e->getPrevious()->getMessage(), $this->logs);
     }
   }
 
@@ -263,12 +337,31 @@ class GptAtEcProviderTest extends UnitTestCase {
    * Data provider for ::testUnreadableReply().
    */
   public static function providerUnreadableReply(): \Generator {
-    // Each reply has a field of the wrong type, which makes the client throw a
-    // \TypeError.
+    // A field of the wrong type makes the client throw a \TypeError.
     $fixtures = __DIR__ . '/../../fixtures/';
     $reply = json_decode(file_get_contents($fixtures . 'responses/create.json'), TRUE);
     $reply['created_at'] = 'yesterday';
-    yield 'Responses' => ['gpt-5.1', FALSE, json_encode($reply)];
+    yield 'Responses' => ['gpt-5.1', FALSE, json_encode($reply), \TypeError::class];
+
+    // A type of item it doesn't know makes it throw an \UnhandledMatchError.
+    $reply = json_decode(file_get_contents($fixtures . 'responses/create.json'), TRUE);
+    $reply['tool_choice'] = ['type' => 'allowed_tools', 'mode' => 'auto', 'tools' => []];
+    yield 'Responses, unknown tool choice' => ['gpt-5.1', FALSE, json_encode($reply), \UnhandledMatchError::class];
+
+    $event = [
+      'type' => 'response.content_part.added',
+      'content_index' => 0,
+      'item_id' => 'msg_1',
+      'output_index' => 0,
+      'part' => ['type' => 'unknown_text', 'text' => ''],
+      'sequence_number' => 1,
+    ];
+    yield 'Responses stream, unknown content part' => [
+      'gpt-5.1',
+      TRUE,
+      "event: response.content_part.added\ndata: " . json_encode($event) . "\n\n",
+      \UnhandledMatchError::class,
+    ];
 
     $event = [
       'type' => 'response.output_text.delta',
@@ -282,11 +375,12 @@ class GptAtEcProviderTest extends UnitTestCase {
       'gpt-5.1',
       TRUE,
       "event: response.output_text.delta\ndata: " . json_encode($event) . "\n\n",
+      \TypeError::class,
     ];
 
     $reply = json_decode(file_get_contents($fixtures . 'chat/create.json'), TRUE);
     $reply['created'] = 'yesterday';
-    yield 'Chat Completions' => ['mistral-medium-3.5-128b-api', FALSE, json_encode($reply)];
+    yield 'Chat Completions' => ['mistral-medium-3.5-128b-api', FALSE, json_encode($reply), \TypeError::class];
 
     $chunk = [
       'id' => 'chatcmpl-1',
@@ -299,6 +393,7 @@ class GptAtEcProviderTest extends UnitTestCase {
       'mistral-medium-3.5-128b-api',
       TRUE,
       'data: ' . json_encode($chunk) . "\n\ndata: [DONE]\n\n",
+      \TypeError::class,
     ];
   }
 
@@ -330,12 +425,23 @@ class GptAtEcProviderTest extends UnitTestCase {
     $handler = HandlerStack::create(new MockHandler([$reply]));
     $handler->push(Middleware::history($this->history));
 
+    $this->logs = [];
+    $logger = $this->createMock(LoggerChannelInterface::class);
+    $logger->method('log')->willReturnCallback(function ($level, $message, array $context = []): void {
+      $this->logs[] = $context['@message'] ?? '';
+    });
+    $logger->method('error')->willReturnCallback(function ($message, array $context = []): void {
+      $this->logs[] = $context['@message'] ?? '';
+    });
+    $logger_factory = $this->createMock(LoggerChannelFactoryInterface::class);
+    $logger_factory->method('get')->willReturn($logger);
+
     return new GptAtEcProvider(
       'gpt_at_ec',
       ['label' => 'GPT@EC'],
       new Client(['handler' => $handler]),
       $config_factory,
-      $this->createMock(LoggerChannelFactoryInterface::class),
+      $logger_factory,
       $this->createMock(CacheBackendInterface::class),
       $key_repository,
       $this->createMock(ModuleHandlerInterface::class),
