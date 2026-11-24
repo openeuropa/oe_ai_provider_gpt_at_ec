@@ -10,6 +10,7 @@ use Drupal\Core\Config\ImmutableConfig;
 use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\File\FileSystemInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
+use Drupal\ai\Exception\AiResponseErrorException;
 use Drupal\ai\OperationType\Chat\ChatInput;
 use Drupal\ai\OperationType\Chat\ChatMessage;
 use Drupal\ai\OperationType\Chat\Tools\ToolsFunctionInput;
@@ -237,15 +238,81 @@ class GptAtEcProviderTest extends UnitTestCase {
   }
 
   /**
-   * Creates the provider, with a gateway that sends a plain text reply.
+   * Tests a reply that the client can't read.
    *
-   * @param string $fixture
-   *   The reply of the gateway, relative to the fixtures directory.
+   * @param string $model_id
+   *   The model ID.
+   * @param bool $streamed
+   *   Whether the reply is streamed.
+   * @param string $body
+   *   The body of the reply.
+   */
+  #[DataProvider('providerUnreadableReply')]
+  public function testUnreadableReply(string $model_id, bool $streamed, string $body): void {
+    $provider = $this->createProvider(new Response(200, ['Content-Type' => $streamed ? 'text/event-stream' : 'application/json'], $body));
+    $provider->streamedOutput($streamed);
+
+    $this->expectException(AiResponseErrorException::class);
+    $output = $provider->chat('Hello', $model_id);
+    // A stream is read only when it is iterated.
+    foreach ($output->getNormalized() as $chunk) {
+    }
+  }
+
+  /**
+   * Data provider for ::testUnreadableReply().
+   */
+  public static function providerUnreadableReply(): \Generator {
+    // Each reply has a field of the wrong type, which makes the client throw a
+    // \TypeError.
+    $fixtures = __DIR__ . '/../../fixtures/';
+    $reply = json_decode(file_get_contents($fixtures . 'responses/create.json'), TRUE);
+    $reply['created_at'] = 'yesterday';
+    yield 'Responses' => ['gpt-5.1', FALSE, json_encode($reply)];
+
+    $event = [
+      'type' => 'response.output_text.delta',
+      'content_index' => 'first',
+      'delta' => 'Hello!',
+      'item_id' => 'msg_1',
+      'output_index' => 0,
+      'sequence_number' => 1,
+    ];
+    yield 'Responses stream' => [
+      'gpt-5.1',
+      TRUE,
+      "event: response.output_text.delta\ndata: " . json_encode($event) . "\n\n",
+    ];
+
+    $reply = json_decode(file_get_contents($fixtures . 'chat/create.json'), TRUE);
+    $reply['created'] = 'yesterday';
+    yield 'Chat Completions' => ['mistral-medium-3.5-128b-api', FALSE, json_encode($reply)];
+
+    $chunk = [
+      'id' => 'chatcmpl-1',
+      'object' => 'chat.completion.chunk',
+      'created' => 'yesterday',
+      'model' => 'mistral-medium-3.5-128b-api',
+      'choices' => [],
+    ];
+    yield 'Chat Completions stream' => [
+      'mistral-medium-3.5-128b-api',
+      TRUE,
+      'data: ' . json_encode($chunk) . "\n\ndata: [DONE]\n\n",
+    ];
+  }
+
+  /**
+   * Creates the provider, with a gateway that sends one reply.
+   *
+   * @param string|\GuzzleHttp\Psr7\Response $reply
+   *   The reply of the gateway: a file relative to the fixtures directory, or
+   *   the response itself.
    *
    * @return \Drupal\oe_ai_provider_gpt_at_ec\Plugin\AiProvider\GptAtEcProvider
    *   The provider.
    */
-  protected function createProvider(string $fixture = 'responses/create.json'): GptAtEcProvider {
+  protected function createProvider(string|Response $reply = 'responses/create.json'): GptAtEcProvider {
     $config = $this->createMock(ImmutableConfig::class);
     $config->method('get')->willReturnMap([['api_key', 'gpt_at_ec']]);
     $config_factory = $this->createMock(ConfigFactoryInterface::class);
@@ -257,9 +324,10 @@ class GptAtEcProviderTest extends UnitTestCase {
     $key_repository->method('getKey')->willReturn($key);
 
     $this->history = [];
-    $handler = HandlerStack::create(new MockHandler([
-      new Response(200, ['Content-Type' => 'application/json'], file_get_contents(__DIR__ . '/../../fixtures/' . $fixture)),
-    ]));
+    if (is_string($reply)) {
+      $reply = new Response(200, ['Content-Type' => 'application/json'], file_get_contents(__DIR__ . '/../../fixtures/' . $reply));
+    }
+    $handler = HandlerStack::create(new MockHandler([$reply]));
     $handler->push(Middleware::history($this->history));
 
     return new GptAtEcProvider(

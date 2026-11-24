@@ -25,6 +25,7 @@ use Drupal\Component\Serialization\Json;
 use Drupal\Core\Config\ImmutableConfig;
 use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
+use Drupal\Core\Utility\Error;
 use Drupal\oe_ai_provider_gpt_at_ec\ChatCompletionsMessageIterator;
 use Drupal\oe_ai_provider_gpt_at_ec\ChatMessageIterator;
 use OpenAI\Exceptions\ErrorException;
@@ -44,6 +45,11 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
   use ChatTrait;
 
   public const string CONFIG_NAME = 'oe_ai_provider_gpt_at_ec.settings';
+
+  /**
+   * The error message shown instead of the PHP error of an unreadable reply.
+   */
+  public const string UNREADABLE_REPLY_MESSAGE = 'GPT@EC returned a reply that could not be read.';
 
   /**
    * The reasoning behavior of the models that reason, keyed by model ID.
@@ -227,36 +233,42 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
       ] + array_filter($input->getChatStructuredJsonSchema(), fn($value) => $value !== NULL);
     }
 
+    // Only the client calls are in the try: a PHP error in the module's own
+    // code is a bug, not an error in the reply.
     try {
-      if ($this->streamed) {
+      if ($this->streamed || \Fiber::getCurrent()) {
         $response = $this->client->responses()->createStreamed($payload);
-        $message = new ChatMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
-      }
-      // If we are in a fibre, we use a streamed response as the SDK doesn't
-      // support direct async.
-      elseif (\Fiber::getCurrent()) {
-        $response = $this->client->responses()->createStreamed($payload);
-        $stream = new ChatMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
-        // We consume the stream in a fiber, suspending after each chunk until
-        // the stream signals it has finished.
-        foreach ($stream as $chunk) {
-          if ($chunk !== NULL && empty($stream->getFinishReason())) {
-            \Fiber::suspend();
-          }
-        }
-
-        // Create the final message from accumulated data. The reconstructed
-        // output also carries the token usage collected from the stream.
-        $reconstructed = $stream->reconstructChatOutput();
-        $message = $reconstructed->getNormalized();
       }
       else {
         $response = $this->client->responses()->create($payload)->toArray();
-        $message = $this->extractResponsesChatMessage($response, $input);
       }
     }
-    catch (\Exception $e) {
+    catch (\Exception | \TypeError | \UnhandledMatchError $e) {
       throw $this->convertClientException($e);
+    }
+
+    if ($this->streamed) {
+      $message = new ChatMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
+    }
+    // If we are in a fibre, we use a streamed response as the SDK doesn't
+    // support direct async.
+    elseif (\Fiber::getCurrent()) {
+      $stream = new ChatMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
+      // We consume the stream in a fiber, suspending after each chunk until
+      // the stream signals it has finished.
+      foreach ($stream as $chunk) {
+        if ($chunk !== NULL && empty($stream->getFinishReason())) {
+          \Fiber::suspend();
+        }
+      }
+
+      // Create the final message from accumulated data. The reconstructed
+      // output also carries the token usage collected from the stream.
+      $reconstructed = $stream->reconstructChatOutput();
+      $message = $reconstructed->getNormalized();
+    }
+    else {
+      $message = $this->extractResponsesChatMessage($response, $input);
     }
 
     $chat_output = new ChatOutput($message, $response, []);
@@ -642,15 +654,20 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
     try {
       if ($this->streamed) {
         $response = $this->client->chat()->createStreamed($payload);
-        $message = new ChatCompletionsMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
       }
       else {
         $response = $this->client->chat()->create($payload)->toArray();
-        $message = $this->extractChatCompletionsMessage($response, $input);
       }
     }
-    catch (\Exception $e) {
+    catch (\Exception | \TypeError | \UnhandledMatchError $e) {
       throw $this->convertClientException($e);
+    }
+
+    if ($this->streamed) {
+      $message = new ChatCompletionsMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
+    }
+    else {
+      $message = $this->extractChatCompletionsMessage($response, $input);
     }
 
     $chat_output = new ChatOutput($message, $response, []);
@@ -798,16 +815,23 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
   /**
    * Converts an exception thrown by the GPT@EC client to an AI exception.
    *
-   * @param \Exception $exception
-   *   The exception thrown while talking to the gateway.
+   * @param \Exception|\TypeError|\UnhandledMatchError $exception
+   *   The exception thrown while talking to the gateway. The client throws a
+   *   \TypeError when a field of the reply has an unexpected type, and an
+   *   \UnhandledMatchError when it has a type of item it doesn't know.
    *
    * @return \Exception
    *   The AI module exception, wrapping the original one.
    */
-  protected function convertClientException(\Exception $exception): \Exception {
+  protected function convertClientException(\Exception|\TypeError|\UnhandledMatchError $exception): \Exception {
     // Already converted, e.g. by the iterator while consuming a stream.
     if ($exception instanceof AiExceptionInterface) {
       return $exception;
+    }
+
+    if ($exception instanceof \Error) {
+      Error::logException($this->loggerFactory->get('oe_ai_provider_gpt_at_ec'), $exception);
+      return new AiResponseErrorException(self::UNREADABLE_REPLY_MESSAGE, 0, $exception);
     }
 
     $message = $exception->getMessage();
