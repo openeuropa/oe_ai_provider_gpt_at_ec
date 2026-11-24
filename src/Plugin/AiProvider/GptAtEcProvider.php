@@ -607,10 +607,13 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    *   The chat output.
    */
   protected function chatCompletions(array|string|ChatInput $input, string $model_id): ChatOutput {
-    $messages = $input;
-    if ($input instanceof ChatInput) {
-      $messages = $this->buildChatCompletionsMessages($input);
-    }
+    // Chat Completions only takes a list of messages, so a plain string
+    // becomes one user message.
+    $messages = match (TRUE) {
+      $input instanceof ChatInput => $this->buildChatCompletionsMessages($input),
+      is_string($input) => [['role' => 'user', 'content' => $input]],
+      default => $input,
+    };
 
     $payload = [
       'model' => $model_id,

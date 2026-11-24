@@ -224,6 +224,19 @@ class GptAtEcProviderTest extends UnitTestCase {
   }
 
   /**
+   * Tests a plain text input on the Chat Completions endpoint.
+   */
+  public function testChatCompletionsPlainText(): void {
+    $output = $this->createProvider('chat/create.json')->chat('Hello', 'mistral-medium-3.5-128b-api');
+
+    $this->assertSame('Hello!', $output->getNormalized()->getText());
+    $request = $this->history[0]['request'];
+    $this->assertSame('/ecgpt/v1/chat/completions', $request->getUri()->getPath());
+    $body = json_decode((string) $request->getBody(), TRUE, flags: JSON_THROW_ON_ERROR);
+    $this->assertSame([['role' => 'user', 'content' => 'Hello']], $body['messages']);
+  }
+
+  /**
    * Creates the provider, with a gateway that sends a plain text reply.
    *
    * @param string $fixture
