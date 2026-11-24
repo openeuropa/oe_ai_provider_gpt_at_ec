@@ -470,7 +470,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
           'parameters' => empty($parameters) ? [
             'type' => 'object',
             'properties' => (object) [],
-          ] : $this->sanitizeResponsesToolSchema($parameters),
+          ] : $this->sanitizeToolSchema($parameters),
           'strict' => FALSE,
         ];
       }
@@ -483,13 +483,15 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
   }
 
   /**
-   * Strips non-standard keys the Responses API rejects from a JSON schema.
+   * Strips non-standard keys GPT@EC rejects from a tool's JSON schema.
    *
    * The core tool renderer adds a redundant "name" key and a boolean "required"
-   * key to each property. The Chat Completions endpoint tolerated these, but
-   * the Responses endpoint validates schemas strictly and rejects them (the
-   * boolean "required" collides with the JSON Schema array keyword). The
-   * object-level "required" array is preserved.
+   * key to each property. The Responses endpoint validates schemas strictly
+   * and rejects them (the boolean "required" collides with the JSON Schema
+   * array keyword). So does mistral-medium-3.5-128b-api on Chat Completions.
+   * The object-level "required" array is preserved. The core renderer fills
+   * that array only for the top-level properties, so a required nested
+   * property is added to the array of its parent object.
    *
    * @param array $schema
    *   The JSON schema fragment.
@@ -497,7 +499,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    * @return array
    *   The sanitized schema fragment.
    */
-  protected function sanitizeResponsesToolSchema(array $schema): array {
+  protected function sanitizeToolSchema(array $schema): array {
     unset($schema['name']);
     if (isset($schema['required']) && is_bool($schema['required'])) {
       unset($schema['required']);
@@ -505,12 +507,15 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
     if (isset($schema['properties']) && is_array($schema['properties'])) {
       foreach ($schema['properties'] as $key => $property) {
         if (is_array($property)) {
-          $schema['properties'][$key] = $this->sanitizeResponsesToolSchema($property);
+          if (($property['required'] ?? NULL) === TRUE && !in_array($key, $schema['required'] ?? [], TRUE)) {
+            $schema['required'][] = $key;
+          }
+          $schema['properties'][$key] = $this->sanitizeToolSchema($property);
         }
       }
     }
     if (isset($schema['items']) && is_array($schema['items'])) {
-      $schema['items'] = $this->sanitizeResponsesToolSchema($schema['items']);
+      $schema['items'] = $this->sanitizeToolSchema($schema['items']);
     }
 
     return $schema;
@@ -617,6 +622,9 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
       $payload['tools'] = $input->getChatTools()->renderToolsArray();
       foreach ($payload['tools'] as $key => $tool) {
         $payload['tools'][$key]['function']['strict'] = FALSE;
+        if (isset($tool['function']['parameters']) && is_array($tool['function']['parameters'])) {
+          $payload['tools'][$key]['function']['parameters'] = $this->sanitizeToolSchema($tool['function']['parameters']);
+        }
       }
     }
 

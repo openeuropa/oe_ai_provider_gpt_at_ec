@@ -1,0 +1,22 @@
+{
+  "id": "chatcmpl-0123456789abcdef",
+  "object": "chat.completion",
+  "created": 1795455648,
+  "model": "mistralai/Mistral-Medium-3.5-128B",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello!"
+      },
+      "finish_reason": "stop",
+      "logprobs": null
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 8,
+    "completion_tokens": 3,
+    "total_tokens": 11
+  }
+}

@@ -10,6 +10,11 @@ use Drupal\Core\Config\ImmutableConfig;
 use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\File\FileSystemInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
+use Drupal\ai\OperationType\Chat\ChatInput;
+use Drupal\ai\OperationType\Chat\ChatMessage;
+use Drupal\ai\OperationType\Chat\Tools\ToolsFunctionInput;
+use Drupal\ai\OperationType\Chat\Tools\ToolsInput;
+use Drupal\ai\OperationType\Chat\Tools\ToolsPropertyInput;
 use Drupal\key\KeyInterface;
 use Drupal\key\KeyRepositoryInterface;
 use Drupal\oe_ai_provider_gpt_at_ec\Plugin\AiProvider\GptAtEcProvider;
@@ -163,12 +168,71 @@ class GptAtEcProviderTest extends UnitTestCase {
   }
 
   /**
+   * Tests the tool schema sent to both endpoints.
+   *
+   * @param string $model_id
+   *   The model ID.
+   * @param string $fixture
+   *   The reply of the gateway, relative to the fixtures directory.
+   * @param string $path
+   *   The expected endpoint.
+   */
+  #[DataProvider('providerToolSchema')]
+  public function testToolSchema(string $model_id, string $fixture, string $path): void {
+    $input = new ChatInput([new ChatMessage('user', 'What is the weather in Brussels?')]);
+    $input->setChatTools(new ToolsInput([
+      new ToolsFunctionInput('get_weather', [
+        'description' => 'Get the current weather for a city.',
+        'properties' => [
+          new ToolsPropertyInput('city', [
+            'type' => 'string',
+            'description' => 'The city name.',
+            'required' => TRUE,
+          ]),
+        ],
+      ]),
+    ]));
+
+    $this->createProvider($fixture)->chat($input, $model_id);
+
+    $request = $this->history[0]['request'];
+    $this->assertSame($path, $request->getUri()->getPath());
+    $body = json_decode((string) $request->getBody(), TRUE, flags: JSON_THROW_ON_ERROR);
+    $tool = $body['tools'][0];
+    // Chat Completions nests the definition under "function".
+    $parameters = $tool['function']['parameters'] ?? $tool['parameters'];
+    // The "name" and boolean "required" keys of the property are removed, the
+    // "required" list of the object is kept.
+    $this->assertSame([
+      'type' => 'object',
+      'properties' => [
+        'city' => [
+          'type' => 'string',
+          'description' => 'The city name.',
+        ],
+      ],
+      'required' => ['city'],
+    ], $parameters);
+  }
+
+  /**
+   * Data provider for ::testToolSchema().
+   */
+  public static function providerToolSchema(): \Generator {
+    yield 'Responses' => ['gpt-5.1', 'responses/create.json', '/ecgpt/v1/responses'];
+    yield 'Chat Completions' => ['mistral-medium-3.5-128b-api', 'chat/create.json', '/ecgpt/v1/chat/completions'];
+  }
+
+  /**
    * Creates the provider, with a gateway that sends a plain text reply.
+   *
+   * @param string $fixture
+   *   The reply of the gateway, relative to the fixtures directory.
    *
    * @return \Drupal\oe_ai_provider_gpt_at_ec\Plugin\AiProvider\GptAtEcProvider
    *   The provider.
    */
-  protected function createProvider(): GptAtEcProvider {
+  protected function createProvider(string $fixture = 'responses/create.json'): GptAtEcProvider {
     $config = $this->createMock(ImmutableConfig::class);
     $config->method('get')->willReturnMap([['api_key', 'gpt_at_ec']]);
     $config_factory = $this->createMock(ConfigFactoryInterface::class);
@@ -181,7 +245,7 @@ class GptAtEcProviderTest extends UnitTestCase {
 
     $this->history = [];
     $handler = HandlerStack::create(new MockHandler([
-      new Response(200, ['Content-Type' => 'application/json'], file_get_contents(__DIR__ . '/../../fixtures/responses/create.json')),
+      new Response(200, ['Content-Type' => 'application/json'], file_get_contents(__DIR__ . '/../../fixtures/' . $fixture)),
     ]));
     $handler->push(Middleware::history($this->history));
 
