@@ -6,6 +6,7 @@ namespace Drupal\oe_ai_provider_gpt_at_ec;
 
 use Drupal\ai\Exception\AiResponseErrorException;
 use Drupal\ai\OperationType\Chat\StreamedChatMessageIterator;
+use Drupal\oe_ai_provider_gpt_at_ec\Plugin\AiProvider\GptAtEcProvider;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -104,14 +105,15 @@ final class ChatMessageIterator extends StreamedChatMessageIterator {
         $this->logger?->error('The GPT@EC streamed response ended without a terminal event, the answer may be incomplete.');
       }
     }
-    catch (\Exception $e) {
+    catch (\Exception | \TypeError | \UnhandledMatchError $e) {
       // The request was accepted, so anything failing while the stream is read
-      // (an error payload, a broken connection, an unknown event) is an error
-      // in the response.
+      // (an error payload, a broken connection, an unknown event, a field of
+      // an unexpected type) is an error in the response.
       $this->logger?->error('The GPT@EC streamed response failed: @message', [
         '@message' => $e->getMessage(),
       ]);
-      throw new AiResponseErrorException($e->getMessage(), (int) $e->getCode(), $e);
+      $message = $e instanceof \Error ? GptAtEcProvider::UNREADABLE_REPLY_MESSAGE : $e->getMessage();
+      throw new AiResponseErrorException($message, (int) $e->getCode(), $e);
     }
   }
 

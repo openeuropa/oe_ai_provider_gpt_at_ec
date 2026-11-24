@@ -25,6 +25,7 @@ use Drupal\Component\Serialization\Json;
 use Drupal\Core\Config\ImmutableConfig;
 use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
+use Drupal\Core\Utility\Error;
 use Drupal\oe_ai_provider_gpt_at_ec\ChatCompletionsMessageIterator;
 use Drupal\oe_ai_provider_gpt_at_ec\ChatMessageIterator;
 use OpenAI\Exceptions\ErrorException;
@@ -44,6 +45,41 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
   use ChatTrait;
 
   public const string CONFIG_NAME = 'oe_ai_provider_gpt_at_ec.settings';
+
+  /**
+   * The error message shown instead of the PHP error of an unreadable reply.
+   */
+  public const string UNREADABLE_REPLY_MESSAGE = 'GPT@EC returned a reply that could not be read.';
+
+  /**
+   * The reasoning behavior of the models that reason, keyed by model ID.
+   *
+   * - efforts: the values GPT@EC accepts for "reasoning.effort".
+   * - default: the effort the model uses when none is sent.
+   * - sampling_needs_effort_none: TRUE when the model rejects "temperature"
+   *   and "top_p" unless the effort is "none".
+   *
+   * Verified against the gateway. The keys are the model IDs that /models
+   * returns.
+   */
+  protected const array REASONING_MODELS = [
+    'gpt-5.1' => [
+      'efforts' => ['none', 'low', 'medium', 'high'],
+      'default' => 'none',
+      'sampling_needs_effort_none' => TRUE,
+    ],
+    'gpt-5.6-terra-api' => [
+      'efforts' => ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      'default' => 'medium',
+      'sampling_needs_effort_none' => TRUE,
+    ],
+    'gpt-oss-120b' => [
+      'efforts' => ['low', 'medium', 'high'],
+      // Not reported by the gateway; with no effort it reasons like "medium".
+      'default' => 'medium',
+      'sampling_needs_effort_none' => FALSE,
+    ],
+  ];
 
   /**
    * The GPT@EC PHP client.
@@ -101,6 +137,38 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    * {@inheritdoc}
    */
   public function getModelSettings(string $model_id, array $generalConfig = []): array {
+    $reasoning = $this->getReasoningSettings($model_id);
+    if ($reasoning === NULL) {
+      return $generalConfig;
+    }
+
+    $generalConfig['reasoning_effort'] = [
+      'label' => 'Reasoning effort',
+      'description' => 'Controls how much the model reasons before it answers. More reasoning can give better answers to difficult tasks. It also takes more time and uses more tokens.',
+      'type' => 'string',
+      'default' => $reasoning['default'],
+      'required' => FALSE,
+      'constraints' => [
+        'options' => $reasoning['efforts'],
+      ],
+    ];
+
+    if ($reasoning['sampling_needs_effort_none']) {
+      // A model that reasons by default would reject the sampling settings
+      // on every request, so they are not offered, as the OpenAI provider
+      // does for its reasoning models.
+      if ($reasoning['default'] !== 'none') {
+        unset($generalConfig['temperature'], $generalConfig['top_p']);
+      }
+      else {
+        foreach (['temperature', 'top_p'] as $key) {
+          if (isset($generalConfig[$key])) {
+            $generalConfig[$key]['description'] = trim(($generalConfig[$key]['description'] ?? '') . ' This setting applies only when the reasoning effort is "none".');
+          }
+        }
+      }
+    }
+
     return $generalConfig;
   }
 
@@ -148,7 +216,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
     $payload = [
       'model' => $model_id,
       'input' => $responses_input,
-    ] + $this->prepareResponsesConfiguration();
+    ] + $this->prepareResponsesConfiguration($model_id);
 
     // Pass any tools (function calling) definitions to the model.
     if ($input instanceof ChatInput && $input->getChatTools()) {
@@ -166,36 +234,42 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
       ] + array_filter($input->getChatStructuredJsonSchema(), fn($value) => $value !== NULL);
     }
 
+    // Only the client calls are in the try: a PHP error in the module's own
+    // code is a bug, not an error in the reply.
     try {
-      if ($this->streamed) {
+      if ($this->streamed || \Fiber::getCurrent()) {
         $response = $this->client->responses()->createStreamed($payload);
-        $message = new ChatMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
-      }
-      // If we are in a fibre, we use a streamed response as the SDK doesn't
-      // support direct async.
-      elseif (\Fiber::getCurrent()) {
-        $response = $this->client->responses()->createStreamed($payload);
-        $stream = new ChatMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
-        // We consume the stream in a fiber, suspending after each chunk until
-        // the stream signals it has finished.
-        foreach ($stream as $chunk) {
-          if ($chunk !== NULL && empty($stream->getFinishReason())) {
-            \Fiber::suspend();
-          }
-        }
-
-        // Create the final message from accumulated data. The reconstructed
-        // output also carries the token usage collected from the stream.
-        $reconstructed = $stream->reconstructChatOutput();
-        $message = $reconstructed->getNormalized();
       }
       else {
         $response = $this->client->responses()->create($payload)->toArray();
-        $message = $this->extractResponsesChatMessage($response, $input);
       }
     }
-    catch (\Exception $e) {
+    catch (\Exception | \TypeError | \UnhandledMatchError $e) {
       throw $this->convertClientException($e);
+    }
+
+    if ($this->streamed) {
+      $message = new ChatMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
+    }
+    // If we are in a fibre, we use a streamed response as the SDK doesn't
+    // support direct async.
+    elseif (\Fiber::getCurrent()) {
+      $stream = new ChatMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
+      // We consume the stream in a fiber, suspending after each chunk until
+      // the stream signals it has finished.
+      foreach ($stream as $chunk) {
+        if ($chunk !== NULL && empty($stream->getFinishReason())) {
+          \Fiber::suspend();
+        }
+      }
+
+      // Create the final message from accumulated data. The reconstructed
+      // output also carries the token usage collected from the stream.
+      $reconstructed = $stream->reconstructChatOutput();
+      $message = $reconstructed->getNormalized();
+    }
+    else {
+      $message = $this->extractResponsesChatMessage($response, $input);
     }
 
     $chat_output = new ChatOutput($message, $response, []);
@@ -285,7 +359,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
   protected function buildResponsesMessageItem(ChatMessage $message): array {
     // Only images and PDF documents can be attached, both inlined as data
     // URIs: GPT@EC has no file upload endpoint. Verified against the gateway
-    // on 2026-09-10 with gpt-5.1.
+    // with gpt-5.1.
     $parts = [];
     foreach ($message->getFiles() as $file) {
       if ($file instanceof ImageFile) {
@@ -333,13 +407,16 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    * Prepares the provider configuration for the Responses endpoint.
    *
    * Translates Chat Completions configuration keys to their Responses API
-   * equivalents.
+   * equivalents, and drops the parameters the model rejects.
+   *
+   * @param string $model_id
+   *   The model ID.
    *
    * @return array
    *   The Responses-compatible configuration.
    */
-  protected function prepareResponsesConfiguration(): array {
-    $config = $this->configuration;
+  protected function prepareResponsesConfiguration(string $model_id): array {
+    $config = $this->removeEmptyFieldValues($this->configuration);
 
     // The Responses API uses "max_output_tokens" for the output cap. Map the
     // Chat Completions key so existing stored configuration keeps working.
@@ -348,6 +425,65 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
         $config['max_output_tokens'] = $config['max_tokens'];
       }
       unset($config['max_tokens']);
+    }
+
+    // The Responses API uses "reasoning.effort" for the effort. If the caller
+    // already sets "reasoning.effort", the module keeps that value. When the
+    // user selects no effort, the forms send an empty string.
+    $reasoning = $this->getReasoningSettings($model_id);
+    $effort = $config['reasoning_effort'] ?? NULL;
+    unset($config['reasoning_effort']);
+    // An effort the model doesn't list, e.g. one saved for another model,
+    // would fail every request.
+    if ($reasoning !== NULL && !in_array($effort, $reasoning['efforts'], TRUE)) {
+      $effort = NULL;
+    }
+    if (!empty($effort) && empty($config['reasoning']['effort'])) {
+      $config['reasoning']['effort'] = $effort;
+    }
+
+    // Some models reject the sampling parameters while they reason. The
+    // forms send 0.0 for an empty field, so empty fields do not prevent the
+    // error.
+    if ($reasoning !== NULL && $reasoning['sampling_needs_effort_none'] && ($config['reasoning']['effort'] ?? $reasoning['default']) !== 'none') {
+      unset($config['temperature'], $config['top_p']);
+    }
+
+    return $config;
+  }
+
+  /**
+   * Returns the reasoning behavior of a model.
+   *
+   * @param string $model_id
+   *   The model ID.
+   *
+   * @return array{efforts: list<string>, default: string, sampling_needs_effort_none: bool}|null
+   *   The reasoning behavior, see self::REASONING_MODELS, or NULL if the
+   *   model is not in that list.
+   */
+  protected function getReasoningSettings(string $model_id): ?array {
+    return static::REASONING_MODELS[strtolower($model_id)] ?? NULL;
+  }
+
+  /**
+   * Removes the values that the forms send for empty fields.
+   *
+   * The forms send 0 for an empty number field, which the gateway rejects as
+   * the output cap and, for most models, as "top_p". A temperature of 0 is
+   * valid.
+   *
+   * @param array $config
+   *   The provider configuration.
+   *
+   * @return array
+   *   The configuration without those values.
+   */
+  protected function removeEmptyFieldValues(array $config): array {
+    foreach (['max_output_tokens', 'max_tokens', 'top_p'] as $key) {
+      if (isset($config[$key]) && $config[$key] <= 0) {
+        unset($config[$key]);
+      }
     }
 
     return $config;
@@ -376,7 +512,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
           'parameters' => empty($parameters) ? [
             'type' => 'object',
             'properties' => (object) [],
-          ] : $this->sanitizeResponsesToolSchema($parameters),
+          ] : $this->sanitizeToolSchema($parameters),
           'strict' => FALSE,
         ];
       }
@@ -389,13 +525,15 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
   }
 
   /**
-   * Strips non-standard keys the Responses API rejects from a JSON schema.
+   * Strips non-standard keys GPT@EC rejects from a tool's JSON schema.
    *
    * The core tool renderer adds a redundant "name" key and a boolean "required"
-   * key to each property. The Chat Completions endpoint tolerated these, but
-   * the Responses endpoint validates schemas strictly and rejects them (the
-   * boolean "required" collides with the JSON Schema array keyword). The
-   * object-level "required" array is preserved.
+   * key to each property. The Responses endpoint validates schemas strictly
+   * and rejects them (the boolean "required" collides with the JSON Schema
+   * array keyword). So does mistral-medium-3.5-128b-api on Chat Completions.
+   * The object-level "required" array is preserved. The core renderer fills
+   * that array only for the top-level properties, so a required nested
+   * property is added to the array of its parent object.
    *
    * @param array $schema
    *   The JSON schema fragment.
@@ -403,7 +541,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    * @return array
    *   The sanitized schema fragment.
    */
-  protected function sanitizeResponsesToolSchema(array $schema): array {
+  protected function sanitizeToolSchema(array $schema): array {
     unset($schema['name']);
     if (isset($schema['required']) && is_bool($schema['required'])) {
       unset($schema['required']);
@@ -411,12 +549,15 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
     if (isset($schema['properties']) && is_array($schema['properties'])) {
       foreach ($schema['properties'] as $key => $property) {
         if (is_array($property)) {
-          $schema['properties'][$key] = $this->sanitizeResponsesToolSchema($property);
+          if (($property['required'] ?? NULL) === TRUE && !in_array($key, $schema['required'] ?? [], TRUE)) {
+            $schema['required'][] = $key;
+          }
+          $schema['properties'][$key] = $this->sanitizeToolSchema($property);
         }
       }
     }
     if (isset($schema['items']) && is_array($schema['items'])) {
-      $schema['items'] = $this->sanitizeResponsesToolSchema($schema['items']);
+      $schema['items'] = $this->sanitizeToolSchema($schema['items']);
     }
 
     return $schema;
@@ -480,7 +621,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
   /**
    * Determines whether GPT@EC serves a model on the Responses endpoint.
    *
-   * Verified against the gateway on 2026-10-20: the GPT models are served,
+   * Verified against the gateway: the GPT models are served,
    * while the Mistral ones are rejected as not supporting the Responses API.
    *
    * @param string $model_id
@@ -508,10 +649,13 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    *   The chat output.
    */
   protected function chatCompletions(array|string|ChatInput $input, string $model_id): ChatOutput {
-    $messages = $input;
-    if ($input instanceof ChatInput) {
-      $messages = $this->buildChatCompletionsMessages($input);
-    }
+    // Chat Completions only takes a list of messages, so a plain string
+    // becomes one user message.
+    $messages = match (TRUE) {
+      $input instanceof ChatInput => $this->buildChatCompletionsMessages($input),
+      is_string($input) => [['role' => 'user', 'content' => $input]],
+      default => $input,
+    };
 
     $payload = [
       'model' => $model_id,
@@ -523,6 +667,9 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
       $payload['tools'] = $input->getChatTools()->renderToolsArray();
       foreach ($payload['tools'] as $key => $tool) {
         $payload['tools'][$key]['function']['strict'] = FALSE;
+        if (isset($tool['function']['parameters']) && is_array($tool['function']['parameters'])) {
+          $payload['tools'][$key]['function']['parameters'] = $this->sanitizeToolSchema($tool['function']['parameters']);
+        }
       }
     }
 
@@ -537,15 +684,20 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
     try {
       if ($this->streamed) {
         $response = $this->client->chat()->createStreamed($payload);
-        $message = new ChatCompletionsMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
       }
       else {
         $response = $this->client->chat()->create($payload)->toArray();
-        $message = $this->extractChatCompletionsMessage($response, $input);
       }
     }
-    catch (\Exception $e) {
+    catch (\Exception | \TypeError | \UnhandledMatchError $e) {
       throw $this->convertClientException($e);
+    }
+
+    if ($this->streamed) {
+      $message = new ChatCompletionsMessageIterator($response, $this->loggerFactory->get('oe_ai_provider_gpt_at_ec'));
+    }
+    else {
+      $message = $this->extractChatCompletionsMessage($response, $input);
     }
 
     $chat_output = new ChatOutput($message, $response, []);
@@ -617,7 +769,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
    *   The Chat Completions compatible configuration.
    */
   protected function prepareChatCompletionsConfiguration(): array {
-    $config = $this->configuration;
+    $config = $this->removeEmptyFieldValues($this->configuration);
 
     // The output cap setting is named after the Responses API, Chat
     // Completions calls it "max_tokens".
@@ -693,16 +845,23 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
   /**
    * Converts an exception thrown by the GPT@EC client to an AI exception.
    *
-   * @param \Exception $exception
-   *   The exception thrown while talking to the gateway.
+   * @param \Exception|\TypeError|\UnhandledMatchError $exception
+   *   The exception thrown while talking to the gateway. The client throws a
+   *   \TypeError when a field of the reply has an unexpected type, and an
+   *   \UnhandledMatchError when it has a type of item it doesn't know.
    *
    * @return \Exception
    *   The AI module exception, wrapping the original one.
    */
-  protected function convertClientException(\Exception $exception): \Exception {
+  protected function convertClientException(\Exception|\TypeError|\UnhandledMatchError $exception): \Exception {
     // Already converted, e.g. by the iterator while consuming a stream.
     if ($exception instanceof AiExceptionInterface) {
       return $exception;
+    }
+
+    if ($exception instanceof \Error) {
+      Error::logException($this->loggerFactory->get('oe_ai_provider_gpt_at_ec'), $exception);
+      return new AiResponseErrorException(self::UNREADABLE_REPLY_MESSAGE, 0, $exception);
     }
 
     $message = $exception->getMessage();
