@@ -75,6 +75,7 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
     ],
     'gpt-oss-120b' => [
       'efforts' => ['low', 'medium', 'high'],
+      // Not reported by the gateway; with no effort it reasons like "medium".
       'default' => 'medium',
       'sampling_needs_effort_none' => FALSE,
     ],
@@ -429,15 +430,21 @@ class GptAtEcProvider extends AiProviderClientBase implements ContainerFactoryPl
     // The Responses API uses "reasoning.effort" for the effort. If the caller
     // already sets "reasoning.effort", the module keeps that value. When the
     // user selects no effort, the forms send an empty string.
-    if (!empty($config['reasoning_effort']) && empty($config['reasoning']['effort'])) {
-      $config['reasoning']['effort'] = $config['reasoning_effort'];
-    }
+    $reasoning = $this->getReasoningSettings($model_id);
+    $effort = $config['reasoning_effort'] ?? NULL;
     unset($config['reasoning_effort']);
+    // An effort the model doesn't list, e.g. one saved for another model,
+    // would fail every request.
+    if ($reasoning !== NULL && !in_array($effort, $reasoning['efforts'], TRUE)) {
+      $effort = NULL;
+    }
+    if (!empty($effort) && empty($config['reasoning']['effort'])) {
+      $config['reasoning']['effort'] = $effort;
+    }
 
     // Some models reject the sampling parameters while they reason. The
     // forms send 0.0 for an empty field, so empty fields do not prevent the
     // error.
-    $reasoning = $this->getReasoningSettings($model_id);
     if ($reasoning !== NULL && $reasoning['sampling_needs_effort_none'] && ($config['reasoning']['effort'] ?? $reasoning['default']) !== 'none') {
       unset($config['temperature'], $config['top_p']);
     }
